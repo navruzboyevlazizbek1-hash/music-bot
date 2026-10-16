@@ -21,7 +21,7 @@ except ImportError:  # shazamio o'rnatilmagan bo'lsa ham bot ishlayveradi
     Shazam = None
 
 # ============ SOZLAMA ============
-BOT_TOKEN = "8939490453:AAH9gk9vwIwnk7YzBPQYk1Ycq-lRoPTM6vcmain.py"  # @BotFather dan olingan token
+BOT_TOKEN = "8939490453:AAH9gk9vwIwnk7YzBPQYk1Ycq-lRoPTM6vc"  # @BotFather dan olingan token
 DOWNLOAD_DIR = "downloads"
 MAX_TG_FILE = 49 * 1024 * 1024  # Telegram bot orqali yuboriladigan fayl chegarasi (~50 MB)
 PAGE_SIZE = 6
