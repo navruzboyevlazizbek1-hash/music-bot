@@ -1,6 +1,13 @@
 """Telegram musiqa boti: qidiruv, trend, Instagram/TikTok/YouTube havolalari."""
 import asyncio, glob, html, itertools, logging, os, shutil
 
+# FFmpeg avtomatik ta'minlanishi uchun
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defaults, MessageHandler, filters
@@ -189,10 +196,12 @@ def download(url, name, video=False):
     if video:
         opts["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best"
     else:
-        opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
-        if FFMPEG:
-            opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+        opts["format"] = "bestaudio/best"
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True) or {}
     return find_file(name), info.get("title") or ""
