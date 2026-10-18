@@ -1,444 +1,478 @@
-import asyncio
-import os
-import re
-import shutil
-import traceback
-import uuid
+"""Telegram musiqa boti: qidiruv, trend, Instagram/TikTok/YouTube havolalari."""
+import asyncio, glob, html, itertools, logging, os, shutil
 
+from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M, Update
+from telegram.constants import ParseMode
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defaults, MessageHandler, filters
 import yt_dlp
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
 
 try:
     from shazamio import Shazam
-except ImportError:  # shazamio o'rnatilmagan bo'lsa ham bot ishlayveradi
+except Exception:
     Shazam = None
 
-# ============ SOZLAMA ============
-BOT_TOKEN = "8939490453:AAH9gk9vwIwnk7YzBPQYk1Ycq-lRoPTM6vc"  # @BotFather dan olingan token
-DOWNLOAD_DIR = "downloads"
-MAX_TG_FILE = 49 * 1024 * 1024  # Telegram bot orqali yuboriladigan fayl chegarasi (~50 MB)
-PAGE_SIZE = 6
-# Trend musiqalar uchun so'rovlar; ro'yxat tugasa, boshidan aylanadi
-TREND_QUERIES = ["top music hits", "trending songs", "popular songs", "new music hits"]
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("musicbot")
 
-LANG_NAMES = {"uz": "🇺🇿 O'zbekcha", "ru": "🇷🇺 Русский", "en": "🇬🇧 English"}
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8939490453:AAH9gk9vwIwnk7YzBPQYk1Ycq-lRoPTM6vc"
+DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
+MAX_FILE = 49 * 1024 * 1024
+PAGE = 6
+FFMPEG = shutil.which("ffmpeg") is not None
+COUNTER = itertools.count(1)
 EMOJIS = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣"]
+LANGS = {"uz": "O'zbekcha", "ru": "Русский", "en": "English"}
+TREND = [
+    "top music hits", "trending songs", "popular songs", "new music hits", "viral songs",
+    "top 50 global songs", "best pop songs", "hit songs this week", "new music releases",
+    "top charts songs", "best hip hop songs", "best rock songs",
+]
+HOSTS = ("instagram.com", "tiktok.com", "youtube.com", "youtu.be")
+USER_LANG, USER_TREND, LINKS, FILE_IDS, ACTIVE = {}, {}, {}, {}, {}
 
-# ============ MATNLAR ============
 TEXTS = {
     "uz": {
-        "welcome": "🎵 Musiqa botiga xush kelibsiz!",
-        "choose_lang": "🌐 Tilni tanlang:",
-        "lang_set": "✅ Til tanlandi!",
-        "ask": "🎤 Qanday musiqa kerak? Nomini yozing yoki Instagram, TikTok, YouTube linkini yuboring.",
-        "searching": "🔎 Qidirilmoqda...",
-        "source_menu": "📥 Nima yuklab olamiz?",
-        "audio_btn": "🎵 Audio",
-        "video_btn": "🎬 Vedyo yuklab olish",
-        "link_detected": "🔗 Audio yuklanmoqda va qo'shiq aniqlanmoqda...",
-        "video_sending": "⏳ Vedyo yuklanmoqda...",
-        "video_too_big": "⚠️ Vedyo 50 MB dan katta, Telegram orqali yuborib bo'lmaydi. Havola:",
-        "not_found": "😔 Afsuski topilmadi. Aniqroq qilib yozing yoki video link tashlang.",
-        "choose_track": "🎶 Qo'shiqni tanlang:",
-        "trend_title": "🔥 Trenddagi musiqalar:",
+        "welcome": "🎵 <b>Musiqa botiga xush kelibsiz!</b>\n\n📸 Instagram • 🎵 TikTok • ▶️ YouTube\n\nQo'shiq nomini yozing yoki havola tashlang.",
+        "start": "▶️ Boshlash",
+        "lang": "🌐 <b>Tilni tanlang:</b>",
+        "lang_set": "✅ Til: O'zbekcha",
+        "ask": "🎧 Qaysi qo'shiqni topmoqchisiz? Nomini yozing yoki havola tashlang.",
         "trend_btn": "🔥 Trenddagi musiqalar",
-        "downloading": "⏳ Yuklanmoqda...",
-        "error": "❌ Xatolik yuz berdi. Qayta urinib ko'ring.",
-        "fallback_link": "⚠️ Audio yuborib bo'lmadi. Qo'shiqni shu havola orqali tinglang:",
-        "change_lang": "🌐 Til almashtirish",
+        "change": "🌐 Til almashtirish",
+        "searching": "🔎 Qidirilmoqda...",
+        "results": "🎵 <b>«{}»</b> bo'yicha natijalar\n👇 Variantni tanlang:",
+        "trend_results": "🔥 <b>Trenddagi musiqalar</b>\n👇 Variantni tanlang:",
+        "not_found": "😔 Topilmadi. Aniqroq yozing yoki havola tashlang.",
+        "link": "🔗 <b>{}</b>\n\nNima qilay?",
+        "link_plain": "🔗 Havola qabul qilindi.\n\nNima qilay?",
+        "video_btn": "🎬 Vedyo yuklab olish",
+        "audio_btn": "🎵 Musiqani topish",
+        "recognizing": "🎧 Musiqa aniqlanmoqda...",
+        "recognized": "✅ Topildi: <b>{}</b>\n👇 Variantni tanlang:",
+        "from_title": "🔎 Aniq aniqlanmadi, video nomi bo'yicha qidirildi.\n👇 Variantni tanlang:",
+        "loading": "⏳ Yuklanmoqda...",
+        "too_big": "⚠️ Fayl 50 MB dan katta.\nHavola: {}",
+        "fallback": "⚠️ Hozir yuklab bo'lmadi.\nHavola: {}",
+        "expired": "⚠️ Tugma eskirgan. Qayta qidiring.",
+        "error": "⚠️ Xatolik bo'ldi, qayta urinib ko'ring.",
     },
     "ru": {
-        "welcome": "🎵 Добро пожаловать в музыкального бота!",
-        "choose_lang": "🌐 Выберите язык:",
-        "lang_set": "✅ Язык выбран!",
-        "ask": "🎤 Какая музыка нужна? Напишите название или отправьте ссылку из Instagram, TikTok или YouTube.",
+        "welcome": "🎵 <b>Добро пожаловать в музыкального бота!</b>\n\n📸 Instagram • 🎵 TikTok • ▶️ YouTube\n\nНапишите название песни или отправьте ссылку.",
+        "start": "▶️ Начать",
+        "lang": "🌐 <b>Выберите язык:</b>",
+        "lang_set": "✅ Язык: Русский",
+        "ask": "🎧 Какую песню ищете? Напишите название или отправьте ссылку.",
+        "trend_btn": "🔥 Трендовые треки",
+        "change": "🌐 Сменить язык",
         "searching": "🔎 Ищу...",
-        "source_menu": "📥 Что скачать?",
-        "audio_btn": "🎵 Аудио",
+        "results": "🎵 Результаты по запросу <b>«{}»</b>\n👇 Выберите вариант:",
+        "trend_results": "🔥 <b>Трендовые треки</b>\n👇 Выберите вариант:",
+        "not_found": "😔 Ничего не найдено. Напишите точнее или отправьте ссылку.",
+        "link": "🔗 <b>{}</b>\n\nЧто сделать?",
+        "link_plain": "🔗 Ссылка получена.\n\nЧто сделать?",
         "video_btn": "🎬 Скачать видео",
-        "link_detected": "🔗 Загружаю аудио и определяю песню...",
-        "video_sending": "⏳ Видео загружается...",
-        "video_too_big": "⚠️ Видео больше 50 МБ, Telegram не может его отправить. Ссылка:",
-        "not_found": "😔 К сожалению, ничего не найдено. Напишите точнее или отправьте ссылку на видео.",
-        "choose_track": "🎶 Выберите песню:",
-        "trend_title": "🔥 Популярные песни:",
-        "trend_btn": "🔥 Популярные песни",
-        "downloading": "⏳ Загрузка...",
-        "error": "❌ Произошла ошибка. Попробуйте ещё раз.",
-        "fallback_link": "⚠️ Не удалось отправить аудио. Слушайте песню по ссылке:",
-        "change_lang": "🌐 Сменить язык",
+        "audio_btn": "🎵 Найти музыку",
+        "recognizing": "🎧 Определяю музыку...",
+        "recognized": "✅ Найдено: <b>{}</b>\n👇 Выберите вариант:",
+        "from_title": "🔎 Точно не определилось, искал по названию видео.\n👇 Выберите вариант:",
+        "loading": "⏳ Загружаю...",
+        "too_big": "⚠️ Файл больше 50 МБ.\nСсылка: {}",
+        "fallback": "⚠️ Сейчас не удалось загрузить.\nСсылка: {}",
+        "expired": "⚠️ Кнопка устарела. Ищите заново.",
+        "error": "⚠️ Произошла ошибка, попробуйте еще раз.",
     },
     "en": {
-        "welcome": "🎵 Welcome to the music bot!",
-        "choose_lang": "🌐 Choose a language:",
-        "lang_set": "✅ Language set!",
-        "ask": "🎤 What music do you need? Type its name or send an Instagram, TikTok or YouTube link.",
-        "searching": "🔎 Searching...",
-        "source_menu": "📥 What do you want to download?",
-        "audio_btn": "🎵 Audio",
-        "video_btn": "🎬 Download video",
-        "link_detected": "🔗 Downloading the audio and identifying the song...",
-        "video_sending": "⏳ Downloading video...",
-        "video_too_big": "⚠️ The video is over 50 MB, Telegram can't send it. Link:",
-        "not_found": "😔 Sorry, nothing found. Try a more specific name or send a video link.",
-        "choose_track": "🎶 Choose a song:",
-        "trend_title": "🔥 Trending songs:",
+        "welcome": "🎵 <b>Welcome to the music bot!</b>\n\n📸 Instagram • 🎵 TikTok • ▶️ YouTube\n\nType a song name or send a link.",
+        "start": "▶️ Start",
+        "lang": "🌐 <b>Choose a language:</b>",
+        "lang_set": "✅ Language: English",
+        "ask": "🎧 Which song are you looking for? Type a name or send a link.",
         "trend_btn": "🔥 Trending songs",
-        "downloading": "⏳ Downloading...",
-        "error": "❌ Something went wrong. Please try again.",
-        "fallback_link": "⚠️ Couldn't send the audio. Listen to the song via this link:",
-        "change_lang": "🌐 Change language",
+        "change": "🌐 Change language",
+        "searching": "🔎 Searching...",
+        "results": "🎵 Results for <b>«{}»</b>\n👇 Choose a variant:",
+        "trend_results": "🔥 <b>Trending songs</b>\n👇 Choose a variant:",
+        "not_found": "😔 Nothing found. Try a more specific name or send a link.",
+        "link": "🔗 <b>{}</b>\n\nWhat should I do?",
+        "link_plain": "🔗 Link received.\n\nWhat should I do?",
+        "video_btn": "🎬 Download video",
+        "audio_btn": "🎵 Find the music",
+        "recognizing": "🎧 Recognizing the music...",
+        "recognized": "✅ Found: <b>{}</b>\n👇 Choose a variant:",
+        "from_title": "🔎 Could not recognize it exactly, searched by video title.\n👇 Choose a variant:",
+        "loading": "⏳ Downloading...",
+        "too_big": "⚠️ The file is larger than 50 MB.\nLink: {}",
+        "fallback": "⚠️ Could not download right now.\nLink: {}",
+        "expired": "⚠️ Button is outdated. Search again.",
+        "error": "⚠️ Something went wrong, please try again.",
     },
 }
 
-USER_LANG = {}  # chat_id -> til kodi
-USER_TREND = {} # chat_id -> oxirgi trend sahifasi
-RESULTS = {}    # natijalar to'plami: key -> [(nom, url, rasm), ...]
-SEARCHES = {}   # qidiruv to'plami: key -> {"query", "page", "used"}
-LINKS = {}      # Instagram/TikTok/YouTube havolalari: key -> url
+
+def t(cid, key, *args):
+    s = TEXTS[USER_LANG.get(cid, "uz")].get(key, TEXTS["uz"][key])
+    return s.format(*[html.escape(str(a)) for a in args]) if args else s
 
 
-def t(chat_id, key):
-    return TEXTS[USER_LANG.get(chat_id, "uz")][key]
+# ---------- klaviaturalar ----------
+
+def lang_kb():
+    return M([[B(name, callback_data=f"lang:{code}")] for code, name in LANGS.items()])
 
 
-def lang_keyboard():
-    rows = [[InlineKeyboardButton(name, callback_data=f"lang:{code}")]
-            for code, name in LANG_NAMES.items()]
-    return InlineKeyboardMarkup(rows)
-
-
-def trend_keyboard(chat_id):
-    return InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "trend_btn"), callback_data="trend")]])
-
-
-def results_markup(chat_id, key, results, refresh_label=None):
-    # 1-qator: trend (va qidiruv bo'lsa 🔁); 2-qator: til; keyin variantlar
-    row0 = [InlineKeyboardButton(t(chat_id, "trend_btn"), callback_data="trend")]
-    if refresh_label is not None:
-        row0.append(InlineKeyboardButton(refresh_label, callback_data=f"more:{key}"))
-    rows = [row0, [InlineKeyboardButton(t(chat_id, "change_lang"), callback_data="change_lang")]]
-    rows += [
-        [InlineKeyboardButton(f"{EMOJIS[i]} {title[:50]}", callback_data=f"pick:{key}:{i}")]
-        for i, (title, _, _) in enumerate(results)
+def base_rows(cid):
+    return [
+        [B(t(cid, "trend_btn"), callback_data="trend")],
+        [B(t(cid, "change"), callback_data="change")],
     ]
-    return InlineKeyboardMarkup(rows)
 
 
-# ============ YUKLASH / QIDIRISH ============
-def search_youtube(query, count=PAGE_SIZE):
-    opts = {"quiet": True, "no_warnings": True,
-            "extract_flat": True, "skip_download": True}
+def results_kb(cid, items):
+    rows = base_rows(cid)
+    for i, it in enumerate(items):
+        name = it["title"][:47] + "…" if len(it["title"]) > 48 else it["title"]
+        rows.append([B(f"{EMOJIS[i % len(EMOJIS)]} {name}{it['dur']}", callback_data=f"p:{it['vid']}")])
+    return M(rows)
+
+
+def link_kb(cid, lid):
+    rows = [
+        [B(t(cid, "video_btn"), callback_data=f"src:v:{lid}")],
+        [B(t(cid, "audio_btn"), callback_data=f"src:a:{lid}")],
+    ]
+    return M(rows + base_rows(cid))
+
+
+# ---------- qidiruv ----------
+
+def fmt_dur(sec):
+    try:
+        sec = int(sec)
+    except (TypeError, ValueError):
+        return ""
+    return f" · {sec // 60}:{sec % 60:02d}" if sec > 0 else ""
+
+
+def search(query, count):
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{count}:{query}", download=False)
-    results = []
-    for entry in info.get("entries") or []:
-        if entry and entry.get("id"):
-            url = f"https://www.youtube.com/watch?v={entry['id']}"
-            thumb = f"https://i.ytimg.com/vi/{entry['id']}/hqdefault.jpg"
-            results.append((entry.get("title") or "Nomsiz", url, thumb))
-    return results[:count]
+        info = ydl.extract_info(f"ytsearch{count}:{query}", download=False) or {}
+    out = []
+    for e in info.get("entries") or []:
+        if e and e.get("id"):
+            vid = e["id"]
+            out.append({
+                "vid": vid,
+                "title": e.get("title") or vid,
+                "dur": fmt_dur(e.get("duration")),
+                "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            })
+    return out
 
 
-def fetch_page(query, page):
-    # page-chi 6 talik blok; ro'yxat tugasa boshidan qaytadi (cheklov yo'q)
-    results = search_youtube(query, count=PAGE_SIZE * (page + 1))
-    block = results[PAGE_SIZE * page: PAGE_SIZE * page + PAGE_SIZE]
-    if not block and page > 0:
-        block = results[:PAGE_SIZE]
-    return block
+def fetch(query, page):
+    return search(query, (page + 1) * PAGE)[page * PAGE:(page + 1) * PAGE]
 
 
-def download_audio(url, key):
-    # FFmpeg bo'lsa mp3 ga o'giramiz, bo'lmasa m4a ni to'g'ridan-to'g'ri yuklaymiz
-    has_ffmpeg = shutil.which("ffmpeg") is not None
-    opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
-        "outtmpl": os.path.join(DOWNLOAD_DIR, key + ".%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-    }
-    if has_ffmpeg:
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
+# ---------- yuklash ----------
+
+def find_file(name):
+    files = [f for f in glob.glob(os.path.join(DIR, name + ".*")) if not f.endswith((".part", ".ytdl"))]
+    if not files:
+        raise RuntimeError("fayl topilmadi")
+    return max(files, key=os.path.getmtime)
+
+
+def download(url, name, video=False):
+    os.makedirs(DIR, exist_ok=True)
+    opts = {"outtmpl": os.path.join(DIR, name + ".%(ext)s"), "noplaylist": True, "quiet": True, "no_warnings": True}
+    if video:
+        opts["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best"
+    else:
+        opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+        if FFMPEG:
+            opts["format"] = "bestaudio/best"
+            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if has_ffmpeg:
-            path = os.path.join(DOWNLOAD_DIR, key + ".mp3")
-        else:
-            path = ydl.prepare_filename(info)
-    return path, info
+        info = ydl.extract_info(url, download=True) or {}
+    return find_file(name), info.get("title") or ""
 
 
-def download_video(url, key):
-    # ffmpeg shart emas: 720p gacha, bitta faylli mp4 (birlashtirish kerak bo'lmaydi)
-    opts = {
-        "format": "best[ext=mp4][height<=720]/best[height<=720]/best",
-        "outtmpl": os.path.join(DOWNLOAD_DIR, key + ".%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
-    return path, info
+def get_info(url):
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}) as ydl:
+        info = ydl.extract_info(url, download=False) or {}
+    return info.get("title") or "", info.get("thumbnail") or ""
 
 
-async def recognize_song(path):
+def cleanup(name):
+    for f in glob.glob(os.path.join(DIR, name + ".*")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+async def recognize(path):
     if Shazam is None:
         return None
     try:
-        out = await Shazam().recognize(path)
-        track = out.get("track")
-        if track:
-            return f"{track.get('subtitle', '')} {track.get('title', '')}".strip()
+        sh = Shazam()
+        func = getattr(sh, "recognize", None) or sh.recognize_song
+        tr = ((await func(path)) or {}).get("track") or {}
+        return f"{tr.get('subtitle', '')} {tr.get('title', '')}".strip() or None
     except Exception:
-        traceback.print_exc()
+        log.exception("Shazam xatosi")
+        return None
+
+
+# ---------- yuborish ----------
+
+async def quiet_delete(m):
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+
+async def clear_active(cid):
+    old = ACTIVE.pop(cid, None)
+    if old is not None:
+        try:
+            await old.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
+async def send_results(msg, cid, items, header):
+    await clear_active(cid)
+    kb = results_kb(cid, items)
+    sent = None
+    if items:
+        try:
+            sent = await msg.reply_photo(photo=items[0]["thumb"], caption=header, reply_markup=kb)
+        except Exception:
+            log.exception("Rasm yuborilmadi")
+    if sent is None:
+        sent = await msg.reply_text(header, reply_markup=kb)
+    ACTIVE[cid] = sent
+
+
+async def search_and_send(msg, cid, query):
+    status = await msg.reply_text(t(cid, "searching"))
+    try:
+        items = await asyncio.to_thread(fetch, query, 0)
+    except Exception:
+        log.exception("Qidiruv xatosi")
+        items = []
+    await quiet_delete(status)
+    if not items:
+        return await msg.reply_text(t(cid, "not_found"), reply_markup=M(base_rows(cid)))
+    await send_results(msg, cid, items, t(cid, "results", query))
+
+
+async def send_trend(msg, cid):
+    await clear_active(cid)
+    n = USER_TREND.get(cid, 0)
+    USER_TREND[cid] = n + 1
+    q = TREND[n % len(TREND)]
+    page = (n // len(TREND)) % 4
+    items = []
+    try:
+        items = await asyncio.to_thread(fetch, q, page)
+        if not items and page:
+            items = await asyncio.to_thread(fetch, q, 0)
+    except Exception:
+        log.exception("Trend xatosi")
+    if not items:
+        return await msg.reply_text(t(cid, "not_found"), reply_markup=M(base_rows(cid)))
+    await send_results(msg, cid, items, t(cid, "trend_results"))
+
+
+async def send_link_menu(msg, cid, link):
+    await clear_active(cid)
+    lid = next(COUNTER)
+    LINKS[lid] = link
+    title, thumb = "", ""
+    try:
+        title, thumb = await asyncio.to_thread(get_info, link)
+    except Exception:
+        log.exception("Havola ma'lumoti olinmadi")
+    text = t(cid, "link", title[:200]) if title else t(cid, "link_plain")
+    kb = link_kb(cid, lid)
+    sent = None
+    if thumb:
+        try:
+            sent = await msg.reply_photo(photo=thumb, caption=text, reply_markup=kb)
+        except Exception:
+            log.exception("Havola rasmi yuborilmadi")
+    if sent is None:
+        sent = await msg.reply_text(text, reply_markup=kb)
+    ACTIVE[cid] = sent
+
+
+async def send_track(msg, cid, vid):
+    fid = FILE_IDS.get(vid)
+    if fid:
+        try:
+            await msg.reply_audio(audio=fid)
+            return
+        except Exception:
+            FILE_IDS.pop(vid, None)
+    url = f"https://www.youtube.com/watch?v={vid}"
+    status = await msg.reply_text(t(cid, "loading"))
+    name = f"a{next(COUNTER)}"
+    try:
+        path, title = await asyncio.to_thread(download, url, name)
+        if os.path.getsize(path) > MAX_FILE:
+            return await msg.reply_text(t(cid, "too_big", url))
+        with open(path, "rb") as f:
+            sent = await msg.reply_audio(audio=f, title=title[:64] or None)
+        if sent and sent.audio:
+            FILE_IDS[vid] = sent.audio.file_id
+    except Exception:
+        log.exception("Audio xatosi")
+        await msg.reply_text(t(cid, "fallback", url))
+    finally:
+        cleanup(name)
+        await quiet_delete(status)
+
+
+async def send_video(msg, cid, url):
+    status = await msg.reply_text(t(cid, "loading"))
+    name = f"v{next(COUNTER)}"
+    try:
+        path, _ = await asyncio.to_thread(download, url, name, True)
+        if os.path.getsize(path) > MAX_FILE:
+            return await msg.reply_text(t(cid, "too_big", url))
+        with open(path, "rb") as f:
+            await msg.reply_video(video=f, supports_streaming=True)
+    except Exception:
+        log.exception("Video xatosi")
+        await msg.reply_text(t(cid, "fallback", url))
+    finally:
+        cleanup(name)
+        await quiet_delete(status)
+
+
+async def audio_from_link(msg, cid, url):
+    status = await msg.reply_text(t(cid, "recognizing"))
+    name = f"l{next(COUNTER)}"
+    query, found = "", None
+    try:
+        path, title = await asyncio.to_thread(download, url, name)
+        found = await recognize(path)
+        query = found or title
+    except Exception:
+        log.exception("Havoladan audio olinmadi")
+        try:
+            query = (await asyncio.to_thread(get_info, url))[0]
+        except Exception:
+            query = ""
+    finally:
+        cleanup(name)
+    items = []
+    if query:
+        try:
+            items = await asyncio.to_thread(fetch, query, 0)
+        except Exception:
+            log.exception("Qidiruv xatosi")
+    await quiet_delete(status)
+    if not items:
+        return await msg.reply_text(t(cid, "fallback", url))
+    text = t(cid, "recognized", found) if found else t(cid, "from_title")
+    await send_results(msg, cid, items, text)
+
+
+async def handle_source(msg, cid, kind, lid):
+    url = LINKS.get(lid)
+    if not url:
+        return await msg.reply_text(t(cid, "expired"), reply_markup=M(base_rows(cid)))
+    if kind == "v":
+        await send_video(msg, cid, url)
+    else:
+        await audio_from_link(msg, cid, url)
+
+
+# ---------- handlerlar ----------
+
+def extract_link(text):
+    for tok in text.split():
+        if any(h in tok.lower() for h in HOSTS):
+            return tok if "://" in tok else "https://" + tok
     return None
 
 
-# ============ BUYRUQLAR ============
 async def start(update, context):
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Boshlash", callback_data="start")]])
-    await update.message.reply_text(TEXTS["uz"]["welcome"], reply_markup=kb)
+    cid = update.effective_chat.id
+    kb = M([[B(t(cid, "start"), callback_data="start")]])
+    await update.message.reply_text(t(cid, "welcome"), reply_markup=kb)
 
 
-async def lang_command(update, context):
-    chat_id = update.effective_chat.id
-    await update.message.reply_text(t(chat_id, "choose_lang"), reply_markup=lang_keyboard())
-
-
-# ============ TUGMALAR ============
-async def on_button(update, context):
-    query = update.callback_query
-    await query.answer()
-    message = query.message
-    chat_id = message.chat_id
-    data = query.data
-
-    if data in ("start", "change_lang"):
-        await message.reply_text(t(chat_id, "choose_lang"), reply_markup=lang_keyboard())
-
-    elif data.startswith("lang:"):
-        USER_LANG[chat_id] = data.split(":", 1)[1]
-        await message.reply_text(
-            t(chat_id, "lang_set") + "\n\n" + t(chat_id, "ask"),
-            reply_markup=trend_keyboard(chat_id),
-        )
-
-    elif data == "trend":
-        await send_trend(message, chat_id)
-
-    elif data.startswith("more:"):
-        await refresh_search(message, chat_id, data.split(":", 1)[1])
-
-    elif data.startswith("pick:"):
-        _, key, idx = data.split(":")
-        await send_track(message, chat_id, key, int(idx))
-
-    elif data.startswith("src:"):
-        _, mode, key = data.split(":")
-        await handle_source(message, chat_id, mode, key)
-
-
-# ============ MATN ============
 async def on_text(update, context):
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-    if re.search(r"https?://", text):
-        await handle_link(update.message, chat_id, text)
+    msg, cid = update.message, update.effective_chat.id
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    await clear_active(cid)
+    link = extract_link(text)
+    if link:
+        await send_link_menu(msg, cid, link)
     else:
-        await handle_search(update.message, chat_id, text)
+        await search_and_send(msg, cid, text)
 
 
-async def handle_search(message, chat_id, query):
-    status = await message.reply_text(t(chat_id, "searching"))
+async def on_button(update, context):
+    q = update.callback_query
     try:
-        results = await asyncio.to_thread(fetch_page, query, 0)
+        await q.answer()
     except Exception:
-        traceback.print_exc()
-        results = []
-    await status.delete()
-    await send_search(message, chat_id, query, results)
+        pass
+    msg = q.message
+    cid = msg.chat_id
+    data = q.data or ""
+    if data in ("start", "change"):
+        await msg.reply_text(t(cid, "lang"), reply_markup=lang_kb())
+    elif data.startswith("lang:"):
+        USER_LANG[cid] = data.split(":", 1)[1]
+        await msg.reply_text(t(cid, "lang_set") + "\n\n" + t(cid, "ask"), reply_markup=M(base_rows(cid)))
+    elif data == "trend":
+        await send_trend(msg, cid)
+    elif data.startswith("p:"):
+        await send_track(msg, cid, data[2:])
+    elif data.startswith("src:"):
+        _, kind, lid = data.split(":", 2)
+        await clear_active(cid)
+        await handle_source(msg, cid, kind, int(lid))
 
 
-async def send_search(message, chat_id, query, results):
-    if not results:
-        await message.reply_text(t(chat_id, "not_found"))
-        return
-    await send_batch(message, chat_id, results, t(chat_id, "choose_track"), query=query, page=0)
+async def on_error(update, context):
+    log.error("Xatolik: %s", context.error, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(update.effective_chat.id, t(update.effective_chat.id, "error"))
+        except Exception:
+            pass
 
 
-async def send_batch(message, chat_id, results, caption, query=None, page=0):
-    # Har bir natijalar to'plamining o'z kaliti bor: eski tugmalar doim ishlaydi
-    key = uuid.uuid4().hex[:10]
-    RESULTS[key] = results
-    refresh_label = None
-    if query is not None:
-        SEARCHES[key] = {"query": query, "page": page, "used": False}
-        refresh_label = f"🔁 {page}"  # necha marta yangilangani
-    kb = results_markup(chat_id, key, results, refresh_label)
-    try:
-        await message.reply_photo(photo=results[0][2], caption=caption, reply_markup=kb)
-    except Exception:
-        traceback.print_exc()
-        await message.reply_text(caption, reply_markup=kb)
-
-
-async def refresh_search(message, chat_id, key):
-    info = SEARCHES.get(key)
-    if info is None or info["used"] or key not in RESULTS:
-        return  # bu 🔁 allaqachon ishlatilgan
-    info["used"] = True
-    try:
-        # shu xabardagi 🔁 tugmasini olib tashlaymiz: endi u ishlamaydi
-        await message.edit_reply_markup(reply_markup=results_markup(chat_id, key, RESULTS[key]))
-    except Exception:
-        traceback.print_exc()
-    status = await message.reply_text(t(chat_id, "searching"))
-    page = info["page"] + 1
-    try:
-        results = await asyncio.to_thread(fetch_page, info["query"], page)
-    except Exception:
-        traceback.print_exc()
-        results = []
-    finally:
-        await status.delete()
-    if not results:
-        await message.reply_text(t(chat_id, "not_found"))
-        return
-    await send_batch(message, chat_id, results, t(chat_id, "choose_track"),
-                     query=info["query"], page=page)
-
-
-async def send_trend(message, chat_id):
-    n = USER_TREND.get(chat_id, -1) + 1  # har bosilganda keyingi trend to'plami
-    USER_TREND[chat_id] = n
-    query = TREND_QUERIES[n % len(TREND_QUERIES)]
-    block = n // len(TREND_QUERIES)
-    status = await message.reply_text(t(chat_id, "searching"))
-    try:
-        results = await asyncio.to_thread(fetch_page, query, block)
-    except Exception:
-        traceback.print_exc()
-        results = []
-    await status.delete()
-    if not results:
-        await message.reply_text(t(chat_id, "not_found"))
-        return
-    await send_batch(message, chat_id, results, t(chat_id, "trend_title"))
-
-
-async def handle_link(message, chat_id, url):
-    # Havola kelganda avval tanlov chiqadi: audio yoki vedyo
-    key = uuid.uuid4().hex[:10]
-    LINKS[key] = url
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(t(chat_id, "audio_btn"), callback_data=f"src:audio:{key}"),
-        InlineKeyboardButton(t(chat_id, "video_btn"), callback_data=f"src:video:{key}"),
-    ]])
-    await message.reply_text(t(chat_id, "source_menu"), reply_markup=kb)
-
-
-async def handle_source(message, chat_id, mode, key):
-    url = LINKS.get(key)
-    if url is None:
-        await message.reply_text(t(chat_id, "error"))
-        return
-    if mode == "audio":
-        await audio_from_link(message, chat_id, url)
-    else:
-        await video_from_link(message, chat_id, url)
-
-
-async def audio_from_link(message, chat_id, url):
-    status = await message.reply_text(t(chat_id, "link_detected"))
-    path = None
-    query = ""
-    results = []
-    try:
-        path, info = await asyncio.to_thread(download_audio, url, uuid.uuid4().hex[:10])
-        query = await recognize_song(path) or info.get("track") or info.get("title") or ""
-        if query:
-            results = await asyncio.to_thread(fetch_page, query, 0)
-    except Exception:
-        traceback.print_exc()
-        await message.reply_text(t(chat_id, "error") + "\n" + url)
-        return
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)  # bu faqat aniqlash uchun kerak edi
-        await status.delete()
-    await send_search(message, chat_id, query, results)
-
-
-async def video_from_link(message, chat_id, url):
-    status = await message.reply_text(t(chat_id, "video_sending"))
-    path = None
-    try:
-        path, _ = await asyncio.to_thread(download_video, url, uuid.uuid4().hex[:10])
-        if os.path.getsize(path) > MAX_TG_FILE:
-            await message.reply_text(t(chat_id, "video_too_big") + "\n" + url)
-        else:
-            with open(path, "rb") as f:
-                await message.reply_video(video=f, supports_streaming=True)
-    except Exception:
-        traceback.print_exc()
-        await message.reply_text(t(chat_id, "error") + "\n" + url)
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)  # telefonda joy egallamasligi uchun
-        await status.delete()
-
-
-async def send_track(message, chat_id, key, idx):
-    # Har bir variant tanlanganda o'sha qo'shiq alohida yuboriladi (eski to'plamlardan ham)
-    if key not in RESULTS or idx >= len(RESULTS[key]):
-        await message.reply_text(t(chat_id, "error"))
-        return
-    title, url, _ = RESULTS[key][idx]
-    status = await message.reply_text(t(chat_id, "downloading"))
-    path = None
-    try:
-        path, _ = await asyncio.to_thread(download_audio, url, uuid.uuid4().hex[:10])
-        with open(path, "rb") as f:
-            await message.reply_audio(audio=f, title=title[:60])
-    except Exception:
-        traceback.print_exc()
-        # Audio yuborilmasa ham foydalanuvchi qo'shiqni havola orqali eshitsin
-        await message.reply_text(t(chat_id, "fallback_link") + "\n" + url)
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)  # yuborilgandan keyin telefondan o'chiriladi
-        await status.delete()
-
-
-# ============ ISHGA TUSHIRISH ============
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    os.makedirs(DIR, exist_ok=True)
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .defaults(Defaults(parse_mode=ParseMode.HTML))
+        .concurrent_updates(True)
+        .connect_timeout(30)
+        .read_timeout(60)
+        .write_timeout(120)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("lang", lang_command))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
-    print("Musiqa boti ishga tushdi...")
-    app.run_polling()
+    app.add_error_handler(on_error)
+    log.info("Bot ishga tushdi")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
     main()
-  
